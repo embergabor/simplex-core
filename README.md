@@ -30,7 +30,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.embergabor:simplex-core:0.1.0")
+    implementation("com.embergabor:simplex-core:0.1.1")
 }
 ```
 
@@ -47,7 +47,7 @@ the published version (see the app's README).
 Built and published from a Mac, not on GitHub:
 
 ```bash
-tools/publish.sh 0.1.0 --push
+tools/publish.sh 0.1.1 --push
 ```
 
 It runs the tests, publishes into `../simplex-maven`, commits there and tags this repo. Versions follow
