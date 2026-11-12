@@ -37,6 +37,7 @@ class WakeOnLanTest {
     @Test
     fun targets() {
         assertEquals(listOf("255.255.255.255", "192.168.0.255"), WakeOnLan.targets("http://192.168.0.13:32400"))
+        assertEquals(listOf("255.255.255.255", "192.168.0.255"), WakeOnLan.targets("https://192-168-0-13.0123abcd.plex.direct:32400"))
         assertEquals(listOf("255.255.255.255"), WakeOnLan.targets("https://plex.example.com:32400"))
         assertEquals(listOf("255.255.255.255"), WakeOnLan.targets(null))
     }

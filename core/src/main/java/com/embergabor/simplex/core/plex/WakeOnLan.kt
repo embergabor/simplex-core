@@ -29,11 +29,13 @@ object WakeOnLan {
 
     /**
      * Where the packet goes: everyone on the network, and the server's own /24 broadcast address when
-     * the server is an IPv4 address (some routers drop the all-ones one).
+     * its IPv4 address is known (some routers drop the all-ones one): from an address like 192.168.0.13,
+     * or from a plex.direct name, which starts with it (192-168-0-13.<id>.plex.direct).
      */
     fun targets(serverUri: String?): List<String> {
         val host = serverUri?.let { runCatching { URI(it).host }.getOrNull() }
-        val parts = host?.split('.')?.takeIf { p -> p.size == 4 && p.all { it.toIntOrNull() in 0..255 } }
+        val address = if (host?.endsWith(".plex.direct") == true) host.substringBefore('.').replace('-', '.') else host
+        val parts = address?.split('.')?.takeIf { p -> p.size == 4 && p.all { it.toIntOrNull() in 0..255 } }
         return listOfNotNull("255.255.255.255", parts?.let { it.take(3).joinToString(".") + ".255" })
     }
 

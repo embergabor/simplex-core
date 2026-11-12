@@ -25,7 +25,8 @@ class PlexServer(uri: String, val token: String, val machineId: String?, private
         return try {
             block()
         } catch (e: IOException) {
-            if (client.relocate(this, tried)) block() else throw e
+            // A server that answered is where it was; only one that didn't may have moved.
+            if (e !is PlexStatus && client.relocate(this, tried)) block() else throw e
         }
     }
 

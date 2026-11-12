@@ -22,6 +22,12 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
+/**
+ * Plex answered, but with an error [code]: 401 when it no longer accepts the sign-in, 503 while it's
+ * still starting. Any other [IOException] from a request means nothing answered at all.
+ */
+class PlexStatus(val code: Int, path: String) : IOException("Plex answered $code for $path")
+
 /** Talks to plex.tv: sign-in and the servers the account can reach. Each server is a [PlexServer]. */
 class PlexClient private constructor(context: Context) {
 
@@ -85,7 +91,7 @@ class PlexClient private constructor(context: Context) {
 
     suspend fun call(req: Request, client: OkHttpClient = http): String = withContext(Dispatchers.IO) {
         client.newCall(req).execute().use { r ->
-            if (!r.isSuccessful) throw IOException("Plex answered ${r.code} for ${req.url.encodedPath}")
+            if (!r.isSuccessful) throw PlexStatus(r.code, req.url.encodedPath)
             r.body.string()
         }
     }
