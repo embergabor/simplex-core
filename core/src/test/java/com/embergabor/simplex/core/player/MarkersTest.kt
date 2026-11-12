@@ -26,6 +26,15 @@ class MarkersTest {
         assertEquals(endCredits, Markers.active(e, 3_550_000))
     }
 
+    @Test fun aStreamThatStopsWellBeforeTheEndEndedEarly() {
+        val film = episode(duration = 7_200_000)
+        assertTrue(Markers.endedEarly(film, 2_400_000))
+        assertFalse(Markers.endedEarly(film, 7_190_000))
+        assertFalse(Markers.endedEarly(film, 7_200_000))
+        // No duration from Plex: nothing to compare with.
+        assertFalse(Markers.endedEarly(episode(duration = 0), 1_000))
+    }
+
     @Test fun watchedInEndCreditsOrPast95Percent() {
         val withCredits = episode(3_600_000, endCredits)
         assertFalse(Markers.watched(withCredits, 3_499_000))

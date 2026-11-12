@@ -110,10 +110,10 @@ class PlexServer(uri: String, val token: String, val machineId: String?, private
         if (saved != on) throw IOException("Plex didn't keep the change")
     }
 
-    /** Full metadata including streams, intro/credits markers and chapters, needed before playback. */
     /** Starts fetching [metadata] ahead of playing, see [Prefetch]. */
     fun prefetch(ratingKey: String) = Prefetch.start(this, ratingKey)
 
+    /** Full metadata including streams, intro/credits markers and chapters, needed before playback. */
     suspend fun metadata(ratingKey: String): Item {
         val mc = get("/library/metadata/$ratingKey?includeMarkers=1&includeChapters=1")
         val item = mc.items().first()
@@ -189,8 +189,12 @@ class PlexServer(uri: String, val token: String, val machineId: String?, private
     /**
      * [mkv]: a Matroska stream, which can't be seeked (a seek starts a new conversion); otherwise HLS.
      * [subtitleBurned]: Plex had to burn the subtitle in after all, converting the video.
+     * [session]: Plex's name for this conversion, to end it with [stopConversion].
      */
-    data class Converted(val url: String, val mkv: Boolean, val videoCopied: Boolean, val subtitleBurned: Boolean)
+    data class Converted(val url: String, val mkv: Boolean, val videoCopied: Boolean, val subtitleBurned: Boolean, val session: String)
+
+    /** Ends a conversion Plex is running for [convertedStream], so it doesn't keep working for nobody. */
+    suspend fun stopConversion(session: String) = send("/video/:/transcode/universal/stop?session=${enc(session)}")
 
     /**
      * Asks Plex for a stream with the audio converted (to 5.1 E-AC3 or AC3, for passthrough); Plex copies
@@ -268,6 +272,7 @@ class PlexServer(uri: String, val token: String, val machineId: String?, private
             mkv = keepSubtitle,
             videoCopied = video.decision == "copy",
             subtitleBurned = streams.any { it.streamType == 3 && it.decision == "burn" },
+            session = session,
         )
     }
 

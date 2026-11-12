@@ -103,6 +103,7 @@ import com.embergabor.simplex.core.ui.PlayerPrefs
 import androidx.compose.ui.platform.LocalContext
 import android.view.SurfaceView
 import android.view.SurfaceHolder
+import androidx.compose.ui.platform.LocalDensity
 
 private fun Player.togglePlay() = if (isPlaying) pause() else play()
 
@@ -157,6 +158,13 @@ fun PlayerScreen(
     var lift by remember { mutableFloatStateOf(viewPrefs.subtitleLift) }
     var placing by remember { mutableStateOf(false) }
     var viewHeight by remember { mutableIntStateOf(0) }
+    // The picture's rectangle on screen: a film encoded without its black bars is shorter than the screen.
+    var pictureTop by remember { mutableIntStateOf(0) }
+    var pictureBottom by remember { mutableIntStateOf(0) }
+    // Subtitles may go down into the bar under the picture, but not off the screen. A height kept from
+    // a film with bars is held to that on one without.
+    val lowestLift = MIN_LIFT - if (viewHeight > 0 && pictureBottom > 0) (viewHeight - pictureBottom).toFloat() / viewHeight else 0f
+    val shownLift = lift.coerceAtLeast(lowestLift)
     val root = remember { FocusRequester() }
     val scrub = remember { FocusRequester() }
 
@@ -292,8 +300,8 @@ fun PlayerScreen(
             .onPreviewKeyEvent { e ->
                 if (placing) {
                     if (e.type == KeyEventType.KeyDown) when (e.key) {
-                        Key.DirectionUp -> lift = (lift + LIFT_STEP).coerceAtMost(MAX_LIFT)
-                        Key.DirectionDown -> lift = (lift - LIFT_STEP).coerceAtLeast(MIN_LIFT)
+                        Key.DirectionUp -> lift = (shownLift + LIFT_STEP).coerceAtMost(MAX_LIFT)
+                        Key.DirectionDown -> lift = (shownLift - LIFT_STEP).coerceAtLeast(lowestLift)
                         Key.Back, Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> if (e.nativeKeyEvent.repeatCount == 0) {
                             placing = false
                             viewPrefs.subtitleLift = lift
@@ -368,6 +376,13 @@ fun PlayerScreen(
                         override fun surfaceDestroyed(holder: SurfaceHolder) = onSurfaceGone()
                     })
                     this.player = player
+                    // Media3 keeps the subtitles inside the picture's rectangle; moved, they may leave it
+                    // for the black bars, so nothing is cut off at its edge.
+                    clipChildren = false
+                    findViewById<ViewGroup>(androidx.media3.ui.R.id.exo_content_frame)?.let { frame ->
+                        frame.clipChildren = false
+                        frame.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ -> pictureTop = top; pictureBottom = bottom }
+                    }
                     isFocusable = false
                     descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                     subtitleView?.apply {
@@ -389,7 +404,7 @@ fun PlayerScreen(
                     if (controlsShown) 0.38f else SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION
                 )
                 // Moved as a whole, so picture subtitles (Blu-ray, DVD) move as well as text ones.
-                view.subtitleView?.translationY = -lift * viewHeight
+                view.subtitleView?.translationY = -shownLift * viewHeight
             },
             modifier = Modifier.fillMaxSize().onSizeChanged { viewHeight = it.height },
         )
@@ -427,7 +442,7 @@ fun PlayerScreen(
                 Modifier.align(Alignment.BottomEnd).padding(end = 48.dp, bottom = 48.dp),
             )
         }
-        if (placing) SubtitlePlacing(lift)
+        if (placing) SubtitlePlacing(shownLift, viewHeight, pictureTop, pictureBottom)
         if (error == null && visible && item != null) {
             if (details || trackBox != null) InfoBox(info, trackBox, Modifier.align(Alignment.TopStart).padding(start = 40.dp, top = 28.dp))
             Controls(
@@ -652,22 +667,27 @@ private const val MAX_LIFT = 0.6f
 
 /**
  * Placing the subtitles: how to move them at the top, and a sample line where a text subtitle's last
- * line now sits, for when nothing is being said.
+ * line now sits, for when nothing is being said. Text subtitles sit a little above the bottom of the
+ * picture ([pictureTop] to [pictureBottom] of the screen's [viewHeight] pixels), then moved by [lift].
  */
 @Composable
-private fun SubtitlePlacing(lift: Float) {
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+private fun SubtitlePlacing(lift: Float, viewHeight: Int, pictureTop: Int, pictureBottom: Int) {
+    val fromBottom = with(LocalDensity.current) {
+        val bar = if (pictureBottom > 0) viewHeight - pictureBottom else 0
+        val picture = if (pictureBottom > pictureTop) pictureBottom - pictureTop else viewHeight
+        (bar + picture * SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION + lift * viewHeight).coerceAtLeast(0f).toDp()
+    }
+    Box(Modifier.fillMaxSize()) {
         Text(
             "Subtitle position  ·  Up and down move them  ·  OK when done",
             fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White,
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 32.dp)
                 .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(50)).padding(horizontal = 16.dp, vertical = 8.dp),
         )
-        val bottom = maxHeight * (SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION + lift)
         Text(
             "Subtitles appear here",
             fontSize = 20.sp, color = Color.White.copy(alpha = 0.7f),
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = bottom.coerceAtLeast(0.dp)),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = fromBottom),
         )
     }
 }

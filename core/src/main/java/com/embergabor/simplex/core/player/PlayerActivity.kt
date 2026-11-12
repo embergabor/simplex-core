@@ -43,6 +43,7 @@ import com.embergabor.simplex.core.plex.Stream
 import com.embergabor.simplex.core.ui.AppTheme
 import com.embergabor.simplex.core.ui.PlayerPrefs
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelChildren
@@ -64,6 +65,8 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var plex: PlexServer
     private lateinit var player: ExoPlayer
     private lateinit var caps: AudioCapabilities
+    /** How many channels of decoded audio the HDMI output takes, see [PlexTracks.pcmChannels]. */
+    private var pcmChannels = 2
     private lateinit var showLanguages: ShowLanguages
 
     /** Each entry: a ratingKey on the home server, or "machineId|ratingKey" sources, comma-separated, in the order to try. */
@@ -96,6 +99,12 @@ class PlayerActivity : ComponentActivity() {
 
     /** Plex's converted Matroska stream can't be seeked: a seek starts a new conversion there. */
     private var convertedMkv = false
+    /** The conversion being asked for; a newer one, another video or direct play takes its place. */
+    private var convertJob: Job? = null
+    /** The conversion Plex is running for this player, and on which server: ended when it's no longer played. */
+    private var conversion: Pair<PlexServer, String>? = null
+    /** Where a converted stream last ended before the video's end: it's restarted there once. */
+    private var cutOffAt = -1L
 
     private val current = mutableStateOf<Item?>(null)
     private val audio = mutableStateOf<Stream?>(null)
@@ -125,6 +134,7 @@ class PlayerActivity : ComponentActivity() {
         showDetails = PlayerPrefs(this).playbackDetails
         // What the TV accepts as a bitstream on its current output (here: eARC to the receiver).
         caps = AudioCapabilities.getCapabilities(this, AudioAttributes.DEFAULT, null)
+        pcmChannels = PlexTracks.pcmChannels(this)
         queue += intent.getStringArrayListExtra(EXTRA_KEYS).orEmpty()
         resume = intent.getBooleanExtra(EXTRA_RESUME, false)
         shuffle = intent.getBooleanExtra(EXTRA_SHUFFLE, false)
@@ -194,7 +204,7 @@ class PlayerActivity : ComponentActivity() {
                     ),
                     onPrevious = { skip(-1) }.takeIf { canPrevious.value },
                     onNext = { skip(1) }.takeIf { canNext.value },
-                    planAudio = { s -> part?.let { PlexTracks.planAudio(it, s, caps::supportsEncoding) } ?: PlexTracks.AudioPlan(s, PlexTracks.AudioChoice.PLAY) },
+                    planAudio = { s -> part?.let { PlexTracks.planAudio(it, s, caps::supportsEncoding, pcmChannels) } ?: PlexTracks.AudioPlan(s, PlexTracks.AudioChoice.PLAY) },
                     onExit = ::finish,
                     question = question.value,
                     onAnswer = { useCompat -> answer?.invoke(useCompat) },
@@ -246,6 +256,7 @@ class PlayerActivity : ComponentActivity() {
         if (released) return
         reportStopped()
         released = true
+        stopConversion()
         lifecycleScope.coroutineContext.cancelChildren()
         player.stop()
         player.release()
@@ -300,6 +311,8 @@ class PlayerActivity : ComponentActivity() {
      */
     private fun load(from: Int = 0) {
         loadJob?.cancel()
+        convertJob?.cancel()
+        cutOffAt = -1
         loadJob = lifecycleScope.launch {
             val sources = sources(queue.getOrNull(index) ?: return@launch finish())
             error.value = null
@@ -365,12 +378,13 @@ class PlayerActivity : ComponentActivity() {
             val saved = if (chosen?.id != plexAudio?.id || subtitle.value?.id != plexSubtitle?.id) {
                 async { runCatching { plex.selectStreams(part.id, chosen?.id, subtitle.value?.id ?: 0) } }
             } else null
-            val plan = PlexTracks.planAudio(part, chosen, caps::supportsEncoding)
+            val plan = PlexTracks.planAudio(part, chosen, caps::supportsEncoding, pcmChannels)
 
             // Cleared once something plays, so a fallback to another server still resumes.
             val start = if (resume) item.viewOffset else 0L
             val direct = { s: Stream? -> audio.value = s; playDirect(item, part, start) }
-            val convert = { launch { saved?.await(); audio.value = plan.stream; playConverted(start) }; Unit }
+            // Not in this coroutine: it's over by the time the question is answered.
+            val convert = { audio.value = plan.stream; playConverted(start, after = saved) }
             when (plan.choice) {
                 PlexTracks.AudioChoice.PLAY -> direct(plan.stream)
                 PlexTracks.AudioChoice.CONVERT -> convert()
@@ -380,6 +394,8 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun playDirect(item: Item, part: Part, startMs: Long) {
+        convertJob?.cancel()
+        stopConversion()
         timeBase = 0
         converted = false
         delivery.value = Delivery.DIRECT
@@ -416,7 +432,7 @@ class PlayerActivity : ComponentActivity() {
         val item = current.value ?: return
         val part = item.part ?: return
         item.grandparentRatingKey?.let { showLanguages.setAudio(it, s.languageCode) }
-        val plan = PlexTracks.planAudio(part, s, caps::supportsEncoding)
+        val plan = PlexTracks.planAudio(part, s, caps::supportsEncoding, pcmChannels)
         val position = positionMs()
         val direct = { t: Stream? ->
             audio.value = t
@@ -425,7 +441,7 @@ class PlayerActivity : ComponentActivity() {
         val convert = { audio.value = plan.stream; playConverted(position) }
         lifecycleScope.launch {
             // Remember the viewer's pick on the server; Plex converts whichever track is selected there.
-            runCatching { plex.selectStreams(part.id, s.id, null) }
+            saveSelection { plex.selectStreams(part.id, s.id, null) }
             when (plan.choice) {
                 PlexTracks.AudioChoice.PLAY -> direct(plan.stream)
                 PlexTracks.AudioChoice.CONVERT -> convert()
@@ -467,7 +483,7 @@ class PlayerActivity : ComponentActivity() {
         PlexTracks.apply(player, part, audio.value, s)
         lifecycleScope.launch {
             // Plex's conversion carries whichever subtitle is selected on the server, so save the choice first.
-            runCatching { plex.selectStreams(part.id, null, s?.id ?: 0) }
+            saveSelection { plex.selectStreams(part.id, null, s?.id ?: 0) }
             // A converted stream restarts with the new subtitle (Matroska), or without one (HLS).
             if (converted) playConverted(positionMs())
         }
@@ -496,7 +512,18 @@ class PlayerActivity : ComponentActivity() {
         }
 
         override fun onPlaybackStateChanged(state: Int) {
-            if (state == Player.STATE_ENDED) next()
+            if (state != Player.STATE_ENDED) return
+            val item = current.value
+            val at = positionMs()
+            // Plex's conversion can stop before the video does (the server ended it): that isn't the end, so
+            // it's started again from there. Ending at the same spot again, the stream has no more to give.
+            val again = cutOffAt >= 0 && kotlin.math.abs(at - cutOffAt) < 10_000
+            if (converted && item != null && Markers.endedEarly(item, at) && !again) {
+                cutOffAt = at
+                playConverted(at)
+                return
+            }
+            next()
         }
 
         /**
@@ -531,24 +558,33 @@ class PlayerActivity : ComponentActivity() {
      * Plex converts the audio, starting at [offset]. A selected subtitle comes along as its own track;
      * Plex decides whether the video can be copied.
      */
-    private fun playConverted(offset: Long) {
+    private fun playConverted(offset: Long, after: Deferred<*>? = null) {
+        if (released) return
         triedConversion = true
         val item = current.value ?: return
         val part = item.part ?: return
-        lifecycleScope.launch {
+        // Only the latest request counts: an earlier one still on its way would otherwise land on top of
+        // it, or on the next video.
+        convertJob?.cancel()
+        convertJob = lifecycleScope.launch {
             player.pause()
             preparing.value = true
             val stream = try {
+                after?.await()
                 plex.convertedStream(item.ratingKey, offset, keepSubtitle = subtitle.value != null, PlexTracks.decodableVideoCodecs)
             } catch (e: CancellationException) {
+                // Whatever took this one's place shows its own waiting.
                 throw e
             } catch (e: Exception) {
+                preparing.value = false
                 player.stop()
                 error.value = "This file can't be played on this TV as it is, and Plex couldn't convert it.\n${e.message}"
                 return@launch
-            } finally {
-                preparing.value = false
             }
+            preparing.value = false
+            if (current.value !== item) return@launch
+            stopConversion()
+            conversion = plex to stream.session
             timeBase = offset
             converted = true
             convertedMkv = stream.mkv
@@ -566,10 +602,30 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    /** [positionMs] in the file. A converted stream starts at timeBase; the Matroska one restarts for a seek. */
+    /**
+     * [positionMs] in the file. A converted stream starts at timeBase: the Matroska one restarts for every
+     * seek, the HLS one for a seek to before where it starts.
+     */
     private fun seekTo(positionMs: Long) {
-        if (converted && convertedMkv) playConverted(positionMs)
+        if (converted && (convertedMkv || positionMs < timeBase)) playConverted(positionMs)
         else player.seekTo((positionMs - timeBase).coerceAtLeast(0))
+    }
+
+    /** Tells Plex to end the conversion this player no longer plays. */
+    private fun stopConversion() {
+        val (server, session) = conversion ?: return
+        conversion = null
+        server.fire { stopConversion(session) }
+    }
+
+    /** A choice saved on the server; failing isn't worth stopping for, but being cancelled is passed on. */
+    private suspend fun saveSelection(save: suspend () -> Unit) {
+        try {
+            save()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
     }
 
     /** The end of a video: marks it watched and plays the next one, or closes the player. */
@@ -635,7 +691,8 @@ class PlayerActivity : ComponentActivity() {
 
     /**
      * Video only ever goes through the TV's hardware decoder: it's what deinterlaces and handles HDR,
-     * and a software fallback (FFmpeg or Android's own) can't keep up with 4K anyway.
+     * and a software fallback (FFmpeg or Android's own) can't keep up with 4K anyway. So no extension
+     * renderers, and only hardware decoders ([PlexTracks.hardwareVideo]).
      */
     private class HardwareVideoRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
         override fun buildVideoRenderers(
@@ -648,7 +705,7 @@ class PlayerActivity : ComponentActivity() {
             allowedVideoJoiningTimeMs: Long,
             out: ArrayList<Renderer>,
         ) = super.buildVideoRenderers(
-            context, EXTENSION_RENDERER_MODE_OFF, mediaCodecSelector, false,
+            context, EXTENSION_RENDERER_MODE_OFF, PlexTracks.hardwareVideo, false,
             eventHandler, eventListener, allowedVideoJoiningTimeMs, out,
         )
     }

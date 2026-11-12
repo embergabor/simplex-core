@@ -18,6 +18,12 @@ object Markers {
         return endCredits(item)?.takeIf { positionMs >= it.start && positionMs < it.end }
     }
 
+    /**
+     * A stream that ended at [positionMs] ended before the video did: more than half a minute short.
+     * Plex's conversions can stop like that, and it doesn't mean the video was watched.
+     */
+    fun endedEarly(item: Item, positionMs: Long): Boolean = item.duration > 0 && item.duration - positionMs > 30_000
+
     /** Stopped this far, the video counts as watched: in its end credits, or past 95% without them. */
     fun watched(item: Item, positionMs: Long): Boolean {
         if (item.duration <= 0) return false

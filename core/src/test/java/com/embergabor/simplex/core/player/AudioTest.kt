@@ -33,6 +33,17 @@ class AudioTest {
         assertEquals(dtsHd, PlexTracks.planAudio(part(truehd, ac3, dtsHd), truehd, tv).compat)
     }
 
+    @Test fun surroundPcmOutputDecodesHereInsteadOfConverting() {
+        // A box that sends 5.1 or 7.1 PCM over HDMI: decoded TrueHD, FLAC and PCM stay surround.
+        val truehd = audio("truehd", 8)
+        val ac3 = audio("ac3", 6)
+        for (channels in listOf(6, 8)) {
+            assertEquals(PlexTracks.AudioChoice.PLAY, PlexTracks.planAudio(part(truehd, ac3), truehd, tv, pcmChannels = channels).choice)
+        }
+        // Stereo PCM only, as on the A80J: still asked or converted.
+        assertEquals(PlexTracks.AudioChoice.ASK, PlexTracks.planAudio(part(truehd, ac3), truehd, tv, pcmChannels = 2).choice)
+    }
+
     @Test fun plexConvertsTrueHdWithoutCompatTrack() {
         val s = audio("truehd", 8)
         assertEquals(PlexTracks.AudioChoice.CONVERT, PlexTracks.planAudio(part(s), s, tv).choice)

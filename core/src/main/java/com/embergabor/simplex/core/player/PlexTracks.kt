@@ -9,6 +9,12 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import com.embergabor.simplex.core.plex.Part
 import com.embergabor.simplex.core.plex.Stream
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.common.util.Util
+import android.os.Build
+import android.media.AudioManager
+import android.media.AudioDeviceInfo
+import android.content.Context
 
 /**
  * Maps Plex's audio/subtitle streams onto ExoPlayer's tracks.
@@ -64,16 +70,35 @@ object PlexTracks {
      * Multichannel audio this TV can't pass through as a bitstream (LPCM, TrueHD, FLAC, AAC, Opus 5.1/7.1)
      * would be decoded here, and the TV only outputs stereo PCM to the receiver.
      */
-    fun reachesAsStereo(s: Stream, passthrough: (Int) -> Boolean): Boolean =
-        (s.channels ?: 2) > 2 && encoding(s)?.let(passthrough) != true
+    fun reachesAsStereo(s: Stream, passthrough: (Int) -> Boolean, pcmChannels: Int = 2): Boolean =
+        (s.channels ?: 2) > 2 && encoding(s)?.let(passthrough) != true && pcmChannels < 6
+
+    /**
+     * The most channels of decoded (PCM) audio the HDMI output takes from apps. Only Android 12 and up
+     * says so per format. Before that, and where it doesn't say, 2: decoded audio is taken to reach the
+     * receiver as stereo (true of the Sony A80J, whatever its HDMI socket announces), and Plex converts
+     * surround instead. With 6 or more, surround that can't be passed through is decoded here and stays
+     * surround, lossless for TrueHD, FLAC and PCM.
+     */
+    fun pcmChannels(context: Context): Int {
+        if (Build.VERSION.SDK_INT < 31) return 2
+        val manager = context.getSystemService(AudioManager::class.java) ?: return 2
+        val hdmi = setOf(AudioDeviceInfo.TYPE_HDMI, AudioDeviceInfo.TYPE_HDMI_ARC, AudioDeviceInfo.TYPE_HDMI_EARC)
+        return manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .filter { it.type in hdmi }
+            .flatMap { it.audioProfiles }
+            .filter { Util.isEncodingLinearPcm(it.format) }
+            .flatMap { profile -> profile.channelMasks.map(Integer::bitCount) }
+            .maxOrNull()?.coerceAtLeast(2) ?: 2
+    }
 
     /**
      * Audio that would only reach the receiver as stereo (TrueHD, LPCM, FLAC, AAC, ... 5.1/7.1): Plex converts
      * it, or, when the file has a same-language track that passes through (a compatibility track), the
-     * viewer is asked which. Everything else plays as chosen.
+     * viewer is asked which. Everything else plays as chosen. [pcmChannels]: see [PlexTracks.pcmChannels].
      */
-    fun planAudio(part: Part, chosen: Stream?, passthrough: (Int) -> Boolean): AudioPlan {
-        if (chosen == null || !reachesAsStereo(chosen, passthrough)) return AudioPlan(chosen, AudioChoice.PLAY)
+    fun planAudio(part: Part, chosen: Stream?, passthrough: (Int) -> Boolean, pcmChannels: Int = 2): AudioPlan {
+        if (chosen == null || !reachesAsStereo(chosen, passthrough, pcmChannels)) return AudioPlan(chosen, AudioChoice.PLAY)
         // No receiver (TV speakers, headphones): nothing goes out as surround anyway, so decode it here.
         if (compatRank.keys.none(passthrough)) return AudioPlan(chosen, AudioChoice.PLAY)
         val compat = audioStreams(part)
@@ -166,10 +191,21 @@ object PlexTracks {
         "av1" to MimeTypes.VIDEO_AV1,
     )
 
-    /** Of [VIDEO_CODECS], the ones this TV decodes. */
+    /**
+     * The decoders video may use: the device's hardware ones. A software decoder can't keep up with 4K, so
+     * a codec that only has one counts as not playable here and Plex converts it. H.264 alone may fall
+     * back to software where there's no hardware for it at all, since it's what Plex converts to.
+     */
+    val hardwareVideo = MediaCodecSelector { mime, secure, tunneling ->
+        val all = MediaCodecUtil.getDecoderInfos(mime, secure, tunneling)
+        val hardware = all.filter { it.hardwareAccelerated }
+        if (hardware.isEmpty() && mime == MimeTypes.VIDEO_H264) all else hardware
+    }
+
+    /** Of [VIDEO_CODECS], the ones this TV decodes (see [hardwareVideo]). */
     val decodableVideoCodecs: List<String> by lazy {
         VIDEO_CODECS.filter { (_, mime) ->
-            runCatching { MediaCodecUtil.getDecoderInfos(mime, false, false).isNotEmpty() }.getOrDefault(false)
+            runCatching { hardwareVideo.getDecoderInfos(mime, false, false).isNotEmpty() }.getOrDefault(false)
         }.map { it.first }
     }
 }
