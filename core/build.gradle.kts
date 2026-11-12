@@ -5,7 +5,7 @@ plugins {
 }
 
 // The Plex connection and the player, used by Simplex and PlexVerse. Built and published from a Mac
-// into the simplex-maven repository (tools/publish-core.sh), which GitHub serves as plain files.
+// into the simplex-maven repository (tools/publish.sh), which GitHub serves as plain files.
 val coreVersion = providers.gradleProperty("coreVersion").orElse("0.0.0-local").get()
 
 android {
